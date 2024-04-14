@@ -1,0 +1,122 @@
+#!/bin/bash
+
+set -eo pipefail
+
+if [[ ! -e .devcontainer ]]; then
+  echo this repository does not have devcontainer configuration file.
+  exit 1
+fi
+
+function up () {
+  local MOUNT_CURRENT_DIR
+  MOUNT_CURRENT_DIR=true
+  if [[ "$1" = "false" ]]; then
+    MOUNT_CURRENT_DIR=false
+    shift
+  elif [[ "$1" = "true" ]]; then
+    shift
+  fi
+
+  DEVCONTAINER_CONFIGRATION=$(devcontainer read-configuration | tail -n 1)
+  TARGET=$(
+    echo ${DEVCONTAINER_CONFIGRATION} | \
+    jq -r .workspace.workspaceFolder
+  )
+
+  # postCreateCommand で ssh が必要なものがあった場合エラーになってしまうので skip する必要がある
+  local RESULT
+  if [[ "${MOUNT_CURRENT_DIR}" = "true" ]]; then
+    echo $(pwd)
+    RESULT=$(
+      devcontainer up "$@" \
+	    --mount "type=bind,source=$(pwd),target=${TARGET}" | \
+      tee /dev/tty | \
+      tail -n 1
+    )
+  else
+    RESULT=$(
+      devcontainer up "$@" | \
+      tee /dev/tty | \
+      tail -n 1
+    )
+  fi
+
+  IS_COMPOSE=$(echo $RESULT | jq -r '.composeProjectName != null')
+  TEMP_CONTAINER_CONFIGURAITON_LOG=/tmp/$(basename $(pwd))-$(pwd | sha1sum | awk '{printf $1}').log
+  if [[ "${IS_COMPOSE}" = "true" ]]; then
+    echo ${RESULT} | jq -r '.composeProjectName,.containerId' > ${TEMP_CONTAINER_CONFIGURAITON_LOG}
+  else
+    echo ${RESULT} | jq -r '.containerId' > ${TEMP_CONTAINER_CONFIGURAITON_LOG}
+  fi
+}
+
+function exec_fn () {
+  # default command is bash
+  CMD=${@:-bash}
+  CONTAINER=$(devcontainer up | tail -n 1 | jq -r .containerId)
+
+  # ssh auth socket を人力で bind mount する
+  SOCK_FILE=$(devcontainer exec bash -c 'mktemp /tmp/devcontainer-cli-ssh-sock-XXXXXXX')
+  CONTAINER_SOCK=$(docker inspect ${CONTAINER} | jq -r .[].GraphDriver.Data.MergedDir)${SOCK_FILE}
+
+  sudo mount --bind ${SSH_AUTH_SOCK} ${CONTAINER_SOCK}
+
+  docker exec -it -u vscode \
+  	-e SSH_AUTH_SOCK=${SOCK_FILE} \
+  	${CONTAINER} $CMD
+
+  sudo umount ${CONTAINER_SOCK}
+  sudo rm -f ${CONTAINER_SOCK}
+}
+
+function stop () {
+  TEMP_CONTAINER_CONFIGURAITON_LOG=/tmp/$(basename $(pwd))-$(pwd | sha1sum | awk '{printf $1}').log
+  if [[ $(wc -l $TEMP_CONTAINER_CONFIGURAITON_LOG | cut -f1 -d' ') -eq 1 ]]; then
+    local CONTAINER_ID
+    CONTAINER_ID=$(head ${TEMP_CONTAINER_CONFIGURAITON_LOG})
+    docker stop ${CONTAINER_ID}
+  else
+    local CONTAINER_PROJECT_NAME
+    CONTAINER_PROJECT_NAME=$(head -n 1 ${TEMP_CONTAINER_CONFIGURAITON_LOG})
+    docker stop $(docker ps -a -f name=${CONTAINER_PROJECT_NAME} -q)
+  fi
+  return $?
+}
+
+function down () {
+  stop >> /dev/null
+
+  TEMP_CONTAINER_CONFIGURAITON_LOG=/tmp/$(basename $(pwd))-$(pwd | sha1sum | awk '{printf $1}').log
+  if [[ $(wc -l $TEMP_CONTAINER_CONFIGURAITON_LOG | cut -f1 -d' ') -eq 1 ]]; then
+    local CONTAINER_ID
+    CONTAINER_ID=$(head ${TEMP_CONTAINER_CONFIGURAITON_LOG})
+    docker rm ${CONTAINER_ID}
+  else
+    local CONTAINER_PROJECT_NAME
+    CONTAINER_PROJECT_NAME=$(head -n 1 ${TEMP_CONTAINER_CONFIGURAITON_LOG})
+    docker rm $(docker ps -a -f name=${CONTAINER_PROJECT_NAME} -q)
+  fi
+  rm -f ${TEMP_CONTAINER_CONFIGURAITON_LOG}
+}
+
+function help () {
+  echo "usage:"
+  echo "  devc up [true] # if true, remove existing container"
+  echo "  devc exec [cmd]"
+  echo "  devc stop"
+  echo "  devc down"
+}
+
+if [[ "$1" = "up" ]]; then
+  shift
+  up "$@"
+elif [[ "$1" = "exec" ]]; then
+  shift
+  exec_fn "$@"
+elif [[ "$1" = "stop" ]]; then
+  stop
+elif [[ "$1" = "down" ]]; then
+  down
+else
+  help
+fi
