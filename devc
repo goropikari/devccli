@@ -1,23 +1,27 @@
 #!/bin/bash
 
 set -eo pipefail
+DEVCONTAINER_USER=vscode
 
-if [[ ! -e .devcontainer ]]; then
-  echo this repository does not have devcontainer configuration file.
+if [[ ! -e ".devcontainer" ]]; then
+  echo "this repository does not have devcontainer configuration file."
   exit 1
 fi
 
+# https://github.com/devcontainers/cli/issues/29
+function devw() {
+  devcontainer $1 --workspace-folder . "${@:2}"
+}
+
 function up () {
   local MOUNT_CURRENT_DIR
-  MOUNT_CURRENT_DIR=true
-  if [[ "$1" = "false" ]]; then
-    MOUNT_CURRENT_DIR=false
-    shift
-  elif [[ "$1" = "true" ]]; then
+  MOUNT_CURRENT_DIR="true"
+  if [[ "$1" = "true" || "$1" = "false" ]]; then
+    MOUNT_CURRENT_DIR="$1"
     shift
   fi
 
-  DEVCONTAINER_CONFIGRATION=$(devcontainer read-configuration | tail -n 1)
+  DEVCONTAINER_CONFIGRATION=$(devw read-configuration | tail -n 1)
   TARGET=$(
     echo ${DEVCONTAINER_CONFIGRATION} | \
     jq -r .workspace.workspaceFolder
@@ -28,14 +32,14 @@ function up () {
   if [[ "${MOUNT_CURRENT_DIR}" = "true" ]]; then
     echo $(pwd)
     RESULT=$(
-      devcontainer up "$@" \
-	    --mount "type=bind,source=$(pwd),target=${TARGET}" | \
+      devw up "$@" \
+        --mount "type=bind,source=$(pwd),target=${TARGET}" | \
       tee /dev/tty | \
       tail -n 1
     )
   else
     RESULT=$(
-      devcontainer up "$@" | \
+      devw up "$@" | \
       tee /dev/tty | \
       tail -n 1
     )
@@ -52,21 +56,31 @@ function up () {
 
 function exec_fn () {
   # default command is bash
-  CMD=${@:-bash}
-  CONTAINER=$(devcontainer up | tail -n 1 | jq -r .containerId)
+  CONTAINER=$(devw up --expect-existing-container true --skip-post-create | tail -n 1 | jq -r .containerId)
 
-  # ssh auth socket を人力で bind mount する
-  SOCK_FILE=$(devcontainer exec bash -c 'mktemp /tmp/devcontainer-cli-ssh-sock-XXXXXXX')
-  CONTAINER_SOCK=$(docker inspect ${CONTAINER} | jq -r .[].GraphDriver.Data.MergedDir)${SOCK_FILE}
-
-  sudo mount --bind ${SSH_AUTH_SOCK} ${CONTAINER_SOCK}
-
-  docker exec -it -u vscode \
-  	-e SSH_AUTH_SOCK=${SOCK_FILE} \
-  	${CONTAINER} $CMD
-
-  sudo umount ${CONTAINER_SOCK}
-  sudo rm -f ${CONTAINER_SOCK}
+  local SOCK_FILE
+  local CONTAINER_SOCK
+  local SSH_OPTION
+  if [[ "$1" = "ssh" ]]; then
+    shift
+    CMD="${@:-bash}"
+    # ssh auth socket を人力で bind mount する
+    devw exec mkdir -p /home/${DEVCONTAINER_USER}/.ssh_sock
+    SOCK_FILE=$(devw exec mktemp /home/${DEVCONTAINER_USER}/.ssh_sock/devcontainer-cli-ssh-sock-XXXXXXX)
+    CONTAINER_SOCK=$(docker inspect ${CONTAINER} | jq -r .[].GraphDriver.Data.MergedDir)${SOCK_FILE}
+    sudo mount --bind ${SSH_AUTH_SOCK} ${CONTAINER_SOCK}
+    docker exec -it -u "$DEVCONTAINER_USER" -e SSH_AUTH_SOCK=$SOCK_FILE \
+      -w $(devw read-configuration | tail -n1 | jq -r .workspace.workspaceFolder) \
+      ${CONTAINER} bash -c "$CMD"
+    sudo umount ${CONTAINER_SOCK}
+    sudo rm -f ${CONTAINER_SOCK}
+  else
+    CMD="${@:-bash}"
+    docker exec -it -u "$DEVCONTAINER_USER" \
+      -w $(devw read-configuration | tail -n1 | jq -r .workspace.workspaceFolder) \
+      ${CONTAINER} bash -c "$CMD"
+  fi
+  return $?
 }
 
 function stop () {
@@ -107,7 +121,9 @@ function help () {
   echo "  devc down"
 }
 
-if [[ "$1" = "up" ]]; then
+if [[ "$1" = "help" ]]; then
+  help
+elif [[ "$1" = "up" ]]; then
   shift
   up "$@"
 elif [[ "$1" = "exec" ]]; then
@@ -118,5 +134,5 @@ elif [[ "$1" = "stop" ]]; then
 elif [[ "$1" = "down" ]]; then
   down
 else
-  help
+  devw "$@"
 fi
