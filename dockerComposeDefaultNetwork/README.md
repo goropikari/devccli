@@ -12,5 +12,6 @@ devcontainer exec --workspace-folder=. bash -c 'chmod 700 /home/vscode/.ssh'
 
 # option
 # echo 'ForwardAgent yes' >> ~/.ssh/config
-ssh -t -i ~/.ssh/id_rsa -o NoHostAuthenticationForLocalhost=yes -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -p 2222 vscode@$ip_address
+socat tcp-listen:2222,fork tcp-connect:$ip_address:2222 &
+ssh -t -i ~/.ssh/id_rsa -o NoHostAuthenticationForLocalhost=yes -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -p 2222 vscode@localhost
 ```
